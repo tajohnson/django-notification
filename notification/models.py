@@ -12,7 +12,6 @@ from django.core.exceptions import ImproperlyConfigured
 from django.core.mail import send_mail
 from django.core.mail import EmailMultiAlternatives
 from django.core.urlresolvers import reverse
-from django.template import Context
 from django.template.loader import render_to_string
 from django.utils.translation import ugettext_lazy as _
 from django.utils.translation import ugettext, get_language, activate
@@ -21,7 +20,8 @@ from django.contrib.sites.models import Site
 from django.contrib.auth.models import User
 from django.contrib.auth.models import AnonymousUser
 from django.contrib.contenttypes.models import ContentType
-from django.contrib.contenttypes import generic
+from django.contrib.contenttypes.fields import GenericForeignKey
+from django.apps import apps
 
 QUEUE_ALL = getattr(settings, "NOTIFICATION_QUEUE_ALL", False)
 
@@ -222,7 +222,7 @@ def get_notification_language(user):
     if getattr(settings, "NOTIFICATION_LANGUAGE_MODULE", False):
         try:
             app_label, model_name = settings.NOTIFICATION_LANGUAGE_MODULE.split(".")
-            model = models.get_model(app_label, model_name)
+            model = apps.get_model(app_label, model_name)
             language_model = model._default_manager.get(user__id__exact=user.id)
             if hasattr(language_model, "language"):
                 return language_model.language
@@ -239,13 +239,13 @@ def get_formatted_messages(formats, label, context):
     format_templates = {}
     for format in formats:
         # conditionally turn off autoescaping for .txt extensions in format
-        if format.endswith(".txt"):
-            context.autoescape = False
-        else:
-            context.autoescape = True
+        # if format.endswith(".txt"):
+        #     context.autoescape = False
+        # else:
+        #     context.autoescape = True
         format_templates[format] = render_to_string((
             "notification/%s/%s" % (label, format),
-            "notification/%s" % format), context_instance=context)
+            "notification/%s" % format), context=context)
     return format_templates
 
 
@@ -300,31 +300,32 @@ def send_now(users, label, extra_context=None, on_site=True, sender=None, from_e
             activate(language)
         
         # update context with user specific translations
-        context = Context({
+        context = {
             "recipient": user,
             "sender": sender,
             "notice": ugettext(notice_type.display),
             "notices_url": notices_url,
             "current_site": current_site,
-        })
+        }
         context.update(extra_context)
         
         # get prerendered format messages
         messages = get_formatted_messages(formats, label, context)
-        
-        # Strip newlines from subject
-        subject = "".join(render_to_string("notification/email_subject.txt", {
-            "message": messages["short.txt"],
-        }, context).splitlines())
-        
-        body = render_to_string("notification/email_body.txt", {
-            "message": messages["full.txt"],
-        }, context)
-        if(messages['full.html']):
-            html_body = render_to_string('notification/email_body.html', {
-            'message': messages['full.html'],
-        }, context)
 
+        # Strip newlines from subject
+        subject = "".join(render_to_string("notification/email_subject.txt", dict(context, **{
+            "message": messages["short.txt"],
+        })).splitlines())
+        
+        body = render_to_string("notification/email_body.txt", dict(context, **{
+            "message": messages["full.txt"],
+        }))
+
+        html_body = None
+        if(messages['full.html']):
+            html_body = render_to_string('notification/email_body.html', dict(context, **{
+            'message': messages['full.html'],
+        }))
 
         notice = Notice.objects.create(recipient=user, message=messages["notice.html"],
             notice_type=notice_type, on_site=on_site, sender=sender)
@@ -332,7 +333,8 @@ def send_now(users, label, extra_context=None, on_site=True, sender=None, from_e
             recipients.append(user.email)
 
         msg = EmailMultiAlternatives(subject, body, from_email, recipients)
-        msg.attach_alternative(html_body, "text/html")
+        if html_body:
+            msg.attach_alternative(html_body, "text/html")
         msg.send()
         #send_mail(subject, body, settings.DEFAULT_FROM_EMAIL, recipients)
     
@@ -402,7 +404,7 @@ class ObservedItem(models.Model):
     
     content_type = models.ForeignKey(ContentType)
     object_id = models.PositiveIntegerField()
-    observed_object = generic.GenericForeignKey("content_type", "object_id")
+    observed_object = GenericForeignKey("content_type", "object_id")
     
     notice_type = models.ForeignKey(NoticeType, verbose_name=_("notice type"))
     
